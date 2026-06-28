@@ -1,0 +1,14 @@
+.conda/
+.codex-publish/
+.idea/
+.vscode/
+__pycache__/
+*.pyc
+logs/
+SaveDate/
+ExcelDate/
+*.xlsx
+*.zip
+*.pdb
+*.dll
+*.exe
