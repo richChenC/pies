@@ -325,7 +325,7 @@ class SimpleBatchProcessor:
     
     def generate_excel_report(self, records: List[EnhancedRecord], output_path: Path) -> bool:
         """
-        生成Excel报告，使用与Result.xlsx相同的格式
+        生成中文 Excel 报告。
         
         Args:
             records: 增强记录列表
@@ -352,26 +352,25 @@ class SimpleBatchProcessor:
             # 转换为Excel格式的数据
             data_rows = []
             
-            # 使用与Result.xlsx相同的列标题
             headers = [
-                'Outage', 'SG_ID', 'Data Group', 'Operator', 'Probe Type', 
-                'Probe SN', 'Model', 'Tube Number', 'Start Time', 'End Time'
+                '大修编号', '蒸汽发生器编号', '数据组', '操作员', '探头类型',
+                '探头编码', '探头型号', '管道数量', '开始时间', '结束时间'
             ]
             
             for i, record in enumerate(records, 1):
                 sum_rec = record.sum_record
                 
                 row = [
-                    sum_rec.outage or '',  # Outage
-                    record.steam_generator or sum_rec.sg_id or '',  # SG_ID
-                    f"{record.steam_generator}-{record.data_group_id}" if record.steam_generator and record.data_group_id else sum_rec.sg_id or '',  # Data Group
-                    sum_rec.operator_name or sum_rec.operator_id or '',  # Operator
-                    sum_rec.probe_type or '',  # Probe Type
-                    sum_rec.probe_sn or '',  # Probe SN
-                    sum_rec.model or '',  # Model
-                    sum_rec.tube_count or 0,  # Tube Number
-                    sum_rec.start_time.strftime('%Y-%m-%d %H:%M:%S') if sum_rec.start_time else '',  # Start Time
-                    sum_rec.end_time.strftime('%Y-%m-%d %H:%M:%S') if sum_rec.end_time else ''  # End Time
+                    sum_rec.outage or '',
+                    record.steam_generator or sum_rec.sg_id or '',
+                    f"{record.steam_generator}-{record.data_group_id}" if record.steam_generator and record.data_group_id else sum_rec.sg_id or '',
+                    sum_rec.operator_name or sum_rec.operator_id or '',
+                    sum_rec.probe_type or '',
+                    sum_rec.probe_sn or '',
+                    sum_rec.model or '',
+                    sum_rec.tube_count or 0,
+                    sum_rec.start_time.strftime('%Y-%m-%d %H:%M:%S') if sum_rec.start_time else '',
+                    sum_rec.end_time.strftime('%Y-%m-%d %H:%M:%S') if sum_rec.end_time else ''
                 ]
                 
                 data_rows.append(row)
@@ -380,7 +379,7 @@ class SimpleBatchProcessor:
                 # 使用openpyxl创建Excel文件
                 wb = Workbook()
                 ws = wb.active
-                ws.title = "Probe Data"
+                ws.title = "探头数据"
                 
                 # 写入标题行
                 for col, header in enumerate(headers, 1):
@@ -396,16 +395,16 @@ class SimpleBatchProcessor:
                 
                 # 调整列宽
                 column_widths = {
-                    'A': 10,  # Outage
-                    'B': 8,   # SG_ID
-                    'C': 15,  # Data Group
-                    'D': 15,  # Operator
-                    'E': 12,  # Probe Type
-                    'F': 12,  # Probe SN
-                    'G': 20,  # Model
-                    'H': 12,  # Tube Number
-                    'I': 20,  # Start Time
-                    'J': 20   # End Time
+                    'A': 12,
+                    'B': 14,
+                    'C': 18,
+                    'D': 14,
+                    'E': 14,
+                    'F': 16,
+                    'G': 22,
+                    'H': 12,
+                    'I': 20,
+                    'J': 20
                 }
                 
                 for col, width in column_widths.items():
@@ -417,7 +416,7 @@ class SimpleBatchProcessor:
             else:
                 # 使用xlsxwriter创建Excel文件
                 workbook = xlsxwriter.Workbook(str(output_path))
-                worksheet = workbook.add_worksheet('Probe Data')
+                worksheet = workbook.add_worksheet('探头数据')
                 
                 # 定义格式
                 header_format = workbook.add_format({
@@ -442,7 +441,7 @@ class SimpleBatchProcessor:
                         worksheet.write(row_idx + 1, col_idx, value, cell_format)
                 
                 # 设置列宽
-                column_widths = [10, 8, 15, 15, 12, 12, 20, 12, 20, 20]
+                column_widths = [12, 14, 18, 14, 14, 16, 22, 12, 20, 20]
                 for col, width in enumerate(column_widths):
                     worksheet.set_column(col, col, width)
                 

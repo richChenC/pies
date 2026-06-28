@@ -42,8 +42,8 @@ def _configure_fonts(app: QApplication) -> None:
 def main() -> int:
     logger = build_logger()
     app = QApplication(sys.argv)
-    app.setApplicationName("PIES PyQt")
-    app.setOrganizationName("PIES")
+    app.setApplicationName("涡流检测探头信息提取软件")
+    app.setOrganizationName("探头寿命统计分析")
     _configure_fonts(app)
     # 把全局样式设置到 QApplication，确保所有子控件都能继承
     from .ui.main_window import STYLESHEET
@@ -58,7 +58,7 @@ def main() -> int:
         QMessageBox.critical(
             None,
             "启动失败",
-            f"PIES PyQt 启动失败：\n{exc}\n\n详细信息已写入日志。",
+            f"涡流检测探头信息提取软件启动失败：\n{exc}\n\n详细信息已写入日志。",
         )
         logger.error(detail)
         return 1

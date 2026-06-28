@@ -626,6 +626,11 @@ class MainWindow(QMainWindow):
         self._current_worker: Optional[_Worker] = None
         self._resize_timer: Optional[QTimer] = None
         self._chart_refresh_timer: Optional[QTimer] = None
+        self._summary_table_render_timer: Optional[QTimer] = None
+        self._summary_table_render_token: int = 0
+        self._summary_table_render_batch_size: int = 160
+        self._post_analysis_timer: Optional[QTimer] = None
+        self._post_analysis_payload: Optional[dict] = None
 
         # ── 线程池 ──
         self._pool = QThreadPool.globalInstance()
@@ -1870,7 +1875,19 @@ class MainWindow(QMainWindow):
             if any(optional_col in row for row in data) or folder_summaries:
                 cols.append(optional_col)
         filtered = [{c: r.get(c, '') for c in cols} for r in data]
-        df = pd.DataFrame(filtered, columns=cols)
+        display_columns = {
+            'Outage': '大修编号',
+            'SG_ID': '蒸汽发生器编号',
+            'Data Group': '数据组',
+            'Operator': '操作员',
+            'Probe Type': '探头类型',
+            'Probe SN': '探头编码',
+            'Model': '探头型号',
+            'Tube Number': '管道数量',
+            'Start Time': '开始时间',
+            'End Time': '结束时间',
+        }
+        df = pd.DataFrame(filtered, columns=cols).rename(columns=display_columns)
         with pd.ExcelWriter(path, engine='openpyxl') as writer:
             df.to_excel(writer, sheet_name='SUM文件数据', index=False)
             ws = writer.sheets['SUM文件数据']
@@ -1990,7 +2007,7 @@ class MainWindow(QMainWindow):
             extracted_count = len(records)
             signals.progress.emit("正在整理提取结果...", 40)
             analyzer.add_records(records)
-            statistics = analyzer.analyze(progress_callback=_ana_cb)
+            statistics = analyzer.analyze(progress_callback=_ana_cb, collect_debug_info=False)
             worker.raise_if_cancelled()
         finally:
             for lg in loggers:
@@ -2041,101 +2058,11 @@ class MainWindow(QMainWindow):
         self.session_statistics = dict(statistics)
         self.session_deduplication_info = dict(dedup_info)
         self.session_error_records = list(data.get('error_records') or [])
-        self._warning_messages = []
-        self._warning_by_probe = {}
-
-        # 从 extractor.error_records 收集结构化警告
-        for err in self.session_error_records:
-            probe_sn = str(err.get('探头编号', '') or err.get('probe_sn', '') or '未知探头')
-            msg = str(err.get('错误信息', '') or err.get('错误类型', '') or '')
-            if not msg:
-                continue
-            if msg not in self._warning_messages:
-                self._warning_messages.append(msg)
-            operator = str(err.get('操作员', '') or '')
-            line_number = str(err.get('行号', '') or '')
-            key = self._warning_merge_key(probe_sn, operator, line_number)
-            if key not in self._warning_by_probe:
-                self._warning_by_probe[key] = {
-                    'probe_sn': probe_sn, 'warnings': [], 'details': [],
-                    'warning_types': set(),
-                    'outage': str(err.get('大修编号', '') or ''),
-                    'sg_id':  str(err.get('SG ID', '') or ''),
-                    'data_group': str(err.get('数据组', '') or ''),
-                    'operator':   str(err.get('操作员', '') or ''),
-                    'probe_type': str(err.get('探头类型', '') or ''),
-                    'model':      str(err.get('探头型号', '') or ''),
-                    'tube_number': str(err.get('管道数量', '') or ''),
-                    'start_time': str(err.get('开始时间', '') or ''),
-                    'end_time':   str(err.get('结束时间', '') or ''),
-                    'line_number': str(err.get('行号', '') or ''),
-                }
-            probe_info = self._warning_by_probe[key]
-            if not self._normalize_warning_context_value(probe_info.get('line_number', '')):
-                probe_info['line_number'] = line_number
-            probe_info.setdefault('warning_types', set()).add(msg)
-            if msg not in probe_info['warnings']:
-                probe_info['warnings'].append(msg)
-            probe_info['details'].append({'raw_text': str(err), 'message': msg, 'type': msg})
-
-        # 从 records 的 warnings 字段收集
-        for r in records:
-            for w in (getattr(r, 'warnings', []) or []):
-                if not w:
-                    continue
-                if w not in self._warning_messages:
-                    self._warning_messages.append(w)
-                probe_sn = r.probe_sn
-                operator = getattr(r, 'operator', '') or ''
-                line_number = str(getattr(r, 'warning_line_number', '') or '')
-                data_group = getattr(r, 'data_group', '') or ''
-                context = {
-                    'probe_sn': probe_sn,
-                    'operator': operator,
-                    'line_number': line_number,
-                    'outage': getattr(r, 'outage', ''),
-                    'sg_id': getattr(r, 'sg_id', ''),
-                    'data_group': data_group,
-                    'probe_type': getattr(r, 'probe_type_raw', None) or getattr(r, 'probe_type', ''),
-                    'model': getattr(r, 'model', ''),
-                    'tube_number': str(getattr(r, 'tube_number', '') or ''),
-                    'start_time': r.start_time.strftime('%Y-%m-%d %H:%M:%S') if getattr(r, 'start_time', None) else '',
-                    'end_time': r.end_time.strftime('%Y-%m-%d %H:%M:%S') if getattr(r, 'end_time', None) else '',
-                }
-                if not line_number:
-                    continue
-                key = self._find_warning_group_key(context, w) or self._warning_merge_key(probe_sn, operator, line_number)
-                if key not in self._warning_by_probe:
-                    self._warning_by_probe[key] = {
-                        'probe_sn': probe_sn, 'warnings': [], 'details': [],
-                        'warning_types': set(),
-                        **context,
-                    }
-                probe_info = self._warning_by_probe[key]
-                self._apply_warning_context(probe_info, context)
-                probe_info.setdefault('warning_types', set()).add(w)
-                if w not in probe_info['warnings']:
-                    probe_info['warnings'].append(w)
-                probe_info.setdefault('details', []).append({'raw_text': w, 'message': w, 'type': w})
-
-        for item in (data.get('warning_logs') or []):
-            self._capture_warning_message(
-                str(item.get('message', '') or ''),
-                str(item.get('formatted', '') or item.get('message', '') or ''),
-            )
-
-        # 累计历史
-        if self._history_enabled:
-            self._append_to_history_records(
-                records,
-                warning_groups=self._warning_by_probe,
-                warning_messages=self._warning_messages,
-                error_records=self.session_error_records,
-            )
-
         self._current_scope = "current"
         self._apply_active_dataset(refresh_ui=False)
-        self._update_summary_table(self.current_statistics)
+        self._warning_messages = []
+        self._warning_by_probe = {}
+        self._schedule_summary_table_refresh(self.current_statistics, immediate=True)
         self._refresh_overview_metrics()
         self._refresh_warning_button_state()
         self._btn_process.setEnabled(True)
@@ -2144,10 +2071,134 @@ class MainWindow(QMainWindow):
         self._btn_sum.setEnabled(True)
         self._btn_sum.setText("处理文件夹")
         _apply_btn_style(self._btn_sum, "btn_blue")
-        self._set_status(f"分析完成 - {len(records)} 条记录，{len(statistics)} 个探头", 100)
-        self._show_chart_placeholder("正在生成默认图表...")
+        self._set_status(f"分析完成，正在整理结果... - {len(records)} 条记录，{len(statistics)} 个探头", 96)
+        self._show_chart_placeholder("正在整理分析结果...")
         self._pending_chart_refresh = True
-        QTimer.singleShot(180, lambda: self._ensure_chart_render_ready(force=True))
+        self._post_analysis_payload = dict(data)
+        if self._post_analysis_timer is None:
+            self._post_analysis_timer = QTimer(self)
+            self._post_analysis_timer.setSingleShot(True)
+            self._post_analysis_timer.timeout.connect(self._finalize_excel_success)
+        self._post_analysis_timer.stop()
+        self._post_analysis_timer.start(0)
+
+    def _finalize_excel_success(self):
+        payload = self._post_analysis_payload or {}
+        self._post_analysis_payload = None
+        try:
+            self._set_status("正在整理异常与历史数据...", 97)
+            self._rebuild_warning_state(payload)
+            if self._history_enabled:
+                self._append_to_history_records(
+                    self.session_records,
+                    warning_groups=self._warning_by_probe,
+                    warning_messages=self._warning_messages,
+                    error_records=self.session_error_records,
+                )
+            self._refresh_warning_button_state()
+            self._refresh_overview_metrics()
+            self._schedule_summary_table_refresh(self.current_statistics, immediate=True)
+            self._set_status(
+                f"分析完成 - {len(self.session_records)} 条记录，{len(self.session_statistics)} 个探头",
+                100,
+            )
+            self._show_chart_placeholder("正在生成默认图表...")
+            QTimer.singleShot(260, lambda: self._ensure_chart_render_ready(force=True))
+        except Exception as exc:
+            logger.exception("分析结果收尾失败")
+            self._btn_process.setEnabled(True)
+            self._btn_sum.setEnabled(True)
+            self._set_status("分析完成，但结果整理失败")
+            QMessageBox.warning(self, "提示", f"分析完成，但整理界面结果时出错：\n{exc}")
+
+    def _rebuild_warning_state(self, data: dict):
+        warning_messages: list[str] = []
+        warning_message_set: set[str] = set()
+        warning_by_probe: Dict = {}
+
+        for err in self.session_error_records:
+            probe_sn = str(err.get('探头编号', '') or err.get('probe_sn', '') or '未知探头')
+            msg = str(err.get('错误信息', '') or err.get('错误类型', '') or '')
+            if not msg:
+                continue
+            if msg not in warning_message_set:
+                warning_message_set.add(msg)
+                warning_messages.append(msg)
+            operator = str(err.get('操作员', '') or '')
+            line_number = str(err.get('行号', '') or '')
+            key = self._warning_merge_key(probe_sn, operator, line_number)
+            if key not in warning_by_probe:
+                warning_by_probe[key] = {
+                    'probe_sn': probe_sn, 'warnings': [], 'details': [],
+                    'warning_types': set(),
+                    'outage': str(err.get('大修编号', '') or ''),
+                    'sg_id': str(err.get('SG ID', '') or ''),
+                    'data_group': str(err.get('数据组', '') or ''),
+                    'operator': str(err.get('操作员', '') or ''),
+                    'probe_type': str(err.get('探头类型', '') or ''),
+                    'model': str(err.get('探头型号', '') or ''),
+                    'tube_number': str(err.get('管道数量', '') or ''),
+                    'start_time': str(err.get('开始时间', '') or ''),
+                    'end_time': str(err.get('结束时间', '') or ''),
+                    'line_number': line_number,
+                }
+            probe_info = warning_by_probe[key]
+            if not self._normalize_warning_context_value(probe_info.get('line_number', '')):
+                probe_info['line_number'] = line_number
+            probe_info.setdefault('warning_types', set()).add(msg)
+            if msg not in probe_info['warnings']:
+                probe_info['warnings'].append(msg)
+            probe_info['details'].append({'raw_text': str(err), 'message': msg, 'type': msg})
+
+        self._warning_messages = warning_messages
+        self._warning_by_probe = warning_by_probe
+
+        for r in self.session_records:
+            for w in (getattr(r, 'warnings', []) or []):
+                if not w:
+                    continue
+                if w not in warning_message_set:
+                    warning_message_set.add(w)
+                    warning_messages.append(w)
+                probe_sn = r.probe_sn
+                operator = getattr(r, 'operator', '') or ''
+                line_number = str(getattr(r, 'warning_line_number', '') or '')
+                if not line_number:
+                    continue
+                context = {
+                    'probe_sn': probe_sn,
+                    'operator': operator,
+                    'line_number': line_number,
+                    'outage': getattr(r, 'outage', ''),
+                    'sg_id': getattr(r, 'sg_id', ''),
+                    'data_group': getattr(r, 'data_group', '') or '',
+                    'probe_type': getattr(r, 'probe_type_raw', None) or getattr(r, 'probe_type', ''),
+                    'model': getattr(r, 'model', ''),
+                    'tube_number': str(getattr(r, 'tube_number', '') or ''),
+                    'start_time': r.start_time.strftime('%Y-%m-%d %H:%M:%S') if getattr(r, 'start_time', None) else '',
+                    'end_time': r.end_time.strftime('%Y-%m-%d %H:%M:%S') if getattr(r, 'end_time', None) else '',
+                }
+                key = self._find_warning_group_key(context, w) or self._warning_merge_key(probe_sn, operator, line_number)
+                if key not in warning_by_probe:
+                    warning_by_probe[key] = {
+                        'probe_sn': probe_sn, 'warnings': [], 'details': [],
+                        'warning_types': set(),
+                        **context,
+                    }
+                probe_info = warning_by_probe[key]
+                self._apply_warning_context(probe_info, context)
+                probe_info.setdefault('warning_types', set()).add(w)
+                if w not in probe_info['warnings']:
+                    probe_info['warnings'].append(w)
+                probe_info.setdefault('details', []).append({'raw_text': w, 'message': w, 'type': w})
+
+        self._warning_messages = warning_messages
+        self._warning_by_probe = warning_by_probe
+        for item in (data.get('warning_logs') or []):
+            self._capture_warning_message(
+                str(item.get('message', '') or ''),
+                str(item.get('formatted', '') or item.get('message', '') or ''),
+            )
 
     def _on_worker_error(self, msg: str):
         self._current_worker = None
@@ -2186,7 +2237,30 @@ class MainWindow(QMainWindow):
     #  表格更新
     # ═══════════════════════════════════════════════════════════
     def _update_summary_table(self, statistics: dict | None = None):
+        self._summary_table_render_token += 1
+        self._render_summary_table_chunked(statistics, self._summary_table_render_token, chunked=False)
+
+    def _schedule_summary_table_refresh(self, statistics: dict | None = None, immediate: bool = False):
+        self._summary_table_render_token += 1
+        render_token = self._summary_table_render_token
+        if self._summary_table_render_timer is None:
+            self._summary_table_render_timer = QTimer(self)
+            self._summary_table_render_timer.setSingleShot(True)
+            self._summary_table_render_timer.timeout.connect(self._run_scheduled_summary_refresh)
+        self._pending_summary_statistics = statistics
+        self._pending_summary_render_token = render_token
+        self._summary_table_render_timer.stop()
+        self._summary_table_render_timer.start(0 if immediate else 20)
+
+    def _run_scheduled_summary_refresh(self):
+        statistics = getattr(self, '_pending_summary_statistics', None)
+        render_token = getattr(self, '_pending_summary_render_token', self._summary_table_render_token)
+        self._render_summary_table_chunked(statistics, render_token)
+
+    def _render_summary_table_chunked(self, statistics: dict | None = None, render_token: Optional[int] = None, chunked: bool = True):
         tbl = self._summary_table
+        if render_token is None:
+            render_token = self._summary_table_render_token
         tbl.setSortingEnabled(False)
         tbl.setUpdatesEnabled(False)
         tbl.setRowCount(0)
@@ -2197,67 +2271,91 @@ class MainWindow(QMainWindow):
             display_statistics = statistics or self.current_statistics or {}
         if not filtered or not display_statistics:
             tbl.setUpdatesEnabled(True)
+            tbl.viewport().update()
+            self._refresh_overview_metrics()
             return
         tbl.setRowCount(len(filtered))
+        batch_size = max(60, int(self._summary_table_render_batch_size))
+        if not chunked:
+            batch_size = len(filtered)
 
-        for idx, record in enumerate(filtered):
-            stat: ProbeStatistics = display_statistics.get(record.stat_key)
-            if not stat:
-                continue
-            start_time = getattr(record, 'start_time', None)
-            end_time = getattr(record, 'end_time', None)
-            start_str = start_time.strftime('%Y-%m-%d %H:%M:%S') if start_time else ''
-            end_str = end_time.strftime('%Y-%m-%d %H:%M:%S') if end_time else ''
-            if start_time and end_time:
-                diff_s = (end_time - start_time).total_seconds()
-                sh, sm = diff_s / 3600.0, diff_s / 60.0
-            else:
-                sh = sm = 0.0
-            first_use_time = getattr(stat, 'first_use_time', None)
-            last_use_time = getattr(stat, 'last_use_time', None)
-            first_use = first_use_time.strftime('%Y-%m-%d') if first_use_time else ''
-            last_use = last_use_time.strftime('%Y-%m-%d') if last_use_time else ''
-            probe_type_display = getattr(record, 'probe_type_raw', None) or getattr(stat, 'probe_type', '')
-            longest = float(getattr(stat, 'longest_continuous_duration_minutes', 0.0) or 0.0)
-            total_uses = int(getattr(stat, 'total_uses', 0) or 0)
-            total_duration_minutes = float(getattr(stat, 'total_duration_minutes', 0.0) or 0.0)
-            detection_speed = float(getattr(stat, 'detection_speed', 0.0) or 0.0)
-            unique_tube_count = int(getattr(stat, 'unique_tube_count', 0) or 0)
+        def populate_batch(start_index: int = 0):
+            if render_token != self._summary_table_render_token:
+                return
+            end_index = min(start_index + batch_size, len(filtered))
+            for idx in range(start_index, end_index):
+                record = filtered[idx]
+                stat: ProbeStatistics = display_statistics.get(record.stat_key)
+                if not stat:
+                    continue
+                values = self._build_summary_row_values(idx, record, stat)
+                has_warning = bool(getattr(record, 'warnings', None))
+                row_bg = QColor("#FDEDEC") if has_warning else (QColor("#FAFBFC") if idx % 2 == 1 else QColor("#FFFFFF"))
+                row_fg = QColor("#D84A3A") if has_warning else QColor(TEXT_PRI)
 
-            values = [
-                str(idx + 1),
-                getattr(record, 'outage', '') or '',
-                getattr(record, 'sg_id', '') or '',
-                record.data_group,
-                record.operator,
-                probe_type_display,
-                record.probe_sn,
-                record.model,
-                str(record.tube_number) if record.tube_number is not None else '',
-                str(unique_tube_count),
-                start_str, end_str,
-                f"{sh:.2f}", f"{sm:.2f}",
-                str(total_uses),
-                f"{total_duration_minutes / 60.0:.2f}",
-                f"{longest / 60.0:.2f}",
-                f"{detection_speed:.2f}",
-                first_use, last_use,
-            ]
+                for col, val in enumerate(values):
+                    item = QTableWidgetItem(val)
+                    item.setTextAlignment(Qt.AlignCenter)
+                    item.setBackground(row_bg)
+                    item.setForeground(row_fg)
+                    tbl.setItem(idx, col, item)
 
-            has_warning = bool(getattr(record, 'warnings', None))
-            row_bg = QColor("#FDEDEC") if has_warning else (QColor("#FAFBFC") if idx % 2 == 1 else QColor("#FFFFFF"))
-            row_fg = QColor("#D84A3A") if has_warning else QColor(TEXT_PRI)
+            if chunked and end_index < len(filtered):
+                tbl.setUpdatesEnabled(True)
+                tbl.viewport().update()
+                tbl.setUpdatesEnabled(False)
+                QTimer.singleShot(0, lambda: populate_batch(end_index))
+                return
 
-            for col, val in enumerate(values):
-                item = QTableWidgetItem(val)
-                item.setTextAlignment(Qt.AlignCenter)
-                item.setBackground(row_bg)
-                item.setForeground(row_fg)
-                tbl.setItem(idx, col, item)
+            tbl.setUpdatesEnabled(True)
+            tbl.viewport().update()
+            self._refresh_overview_metrics()
 
-        tbl.setUpdatesEnabled(True)
-        tbl.viewport().update()
-        self._refresh_overview_metrics()
+        populate_batch(0)
+
+    def _build_summary_row_values(self, idx: int, record, stat: ProbeStatistics) -> list[str]:
+        start_time = getattr(record, 'start_time', None)
+        end_time = getattr(record, 'end_time', None)
+        start_str = start_time.strftime('%Y-%m-%d %H:%M:%S') if start_time else ''
+        end_str = end_time.strftime('%Y-%m-%d %H:%M:%S') if end_time else ''
+        if start_time and end_time:
+            diff_s = (end_time - start_time).total_seconds()
+            sh, sm = diff_s / 3600.0, diff_s / 60.0
+        else:
+            sh = sm = 0.0
+        first_use_time = getattr(stat, 'first_use_time', None)
+        last_use_time = getattr(stat, 'last_use_time', None)
+        first_use = first_use_time.strftime('%Y-%m-%d') if first_use_time else ''
+        last_use = last_use_time.strftime('%Y-%m-%d') if last_use_time else ''
+        probe_type_display = getattr(record, 'probe_type_raw', None) or getattr(stat, 'probe_type', '')
+        longest = float(getattr(stat, 'longest_continuous_duration_minutes', 0.0) or 0.0)
+        total_uses = int(getattr(stat, 'total_uses', 0) or 0)
+        total_duration_minutes = float(getattr(stat, 'total_duration_minutes', 0.0) or 0.0)
+        detection_speed = float(getattr(stat, 'detection_speed', 0.0) or 0.0)
+        unique_tube_count = int(getattr(stat, 'unique_tube_count', 0) or 0)
+
+        return [
+            str(idx + 1),
+            getattr(record, 'outage', '') or '',
+            getattr(record, 'sg_id', '') or '',
+            record.data_group,
+            record.operator,
+            probe_type_display,
+            record.probe_sn,
+            record.model,
+            str(record.tube_number) if record.tube_number is not None else '',
+            str(unique_tube_count),
+            start_str,
+            end_str,
+            f"{sh:.2f}",
+            f"{sm:.2f}",
+            str(total_uses),
+            f"{total_duration_minutes / 60.0:.2f}",
+            f"{longest / 60.0:.2f}",
+            f"{detection_speed:.2f}",
+            first_use,
+            last_use,
+        ]
 
     def _on_table_double_click(self, index):
         row = index.row()
@@ -2513,12 +2611,35 @@ class MainWindow(QMainWindow):
         cw = max(420, self._chart_scroll.viewport().width() - 20)
         ch = max(340, self._chart_scroll.viewport().height() - 20)
         self._show_chart_placeholder("正在生成图表...")
-        worker = _Worker(self._prepare_chart_payload, request_token, group, label, chart_key, cw, ch)
-        self._chart_worker = worker
-        worker.signals.chart_ready.connect(self._on_chart_payload_ready)
-        worker.signals.cancelled.connect(self._on_chart_payload_cancelled)
-        worker.signals.error.connect(self._on_chart_payload_error)
-        self._pool.start(worker)
+        QTimer.singleShot(0, lambda: self._prepare_chart_payload_on_ui(request_token, group, label, chart_key, cw, ch))
+
+    def _prepare_chart_payload_on_ui(self, request_token: int, group: str, label: str, chart_key: str, cw: int, ch: int):
+        try:
+            if request_token != self._chart_request_token:
+                self._is_refreshing = False
+                return
+            records, statistics, hidden = self._get_chart_source_data()
+            total_items = len(statistics)
+            fig_kwargs = {
+                'figure_width':  max(7.8, min(22, cw / 115.0 + total_items * 0.08)),
+                'figure_height': max(5.2, min(12.0, ch / 88.0)),
+                'batch_figure_width':  max(9.5, min(20, cw / 120.0 + total_items * 0.18)),
+                'batch_figure_height': max(5.8, min(10, ch / 92.0)),
+            }
+            fig = self._create_chart_figure(chart_key, records, statistics, hidden, fig_kwargs)
+            self._on_chart_payload_ready({
+                'request_token': request_token,
+                'group': group,
+                'label': label,
+                'chart_key': chart_key,
+                'records_empty': not bool(records),
+                'fig': fig,
+            })
+        except Exception as exc:
+            logger.exception("图表主线程生成失败")
+            self._chart_worker = None
+            self._is_refreshing = False
+            self._show_chart_placeholder(f"图表生成失败：{exc}")
 
     def _prepare_chart_payload(self, signals: _WorkerSignals, worker: _Worker, request_token: int, group: str, label: str, chart_key: str, cw: int, ch: int):
         worker.raise_if_cancelled()
@@ -3732,7 +3853,7 @@ class MainWindow(QMainWindow):
             'added_to_history_count': added,
         })
         self._rebuild_history_dedup_info()
-        self._save_history_store()
+        QTimer.singleShot(0, self._save_history_store)
         return added
 
     def _merge_unique_records(self, existing: list, new_records: list) -> Tuple[list, int]:
@@ -3803,27 +3924,19 @@ class MainWindow(QMainWindow):
                     'original_count': session_dedup.get('original_count', 0),
                     'unique_count':   session_dedup.get('unique_count', 0),
                     'removed_count':  session_dedup.get('removed_count', 0),
-                    'removed_records': [
-                        self._serialize_probe_record(r)
-                        for r in (session_dedup.get('removed_records', []) or [])
-                        if hasattr(r, 'probe_sn')
-                    ],
+                    'removed_records': [],
                 },
                 'history_deduplication_info': {
                     'original_count': history_dedup.get('original_count', 0),
                     'unique_count':   history_dedup.get('unique_count', 0),
                     'removed_count':  history_dedup.get('removed_count', 0),
-                    'removed_records': [
-                        self._serialize_probe_record(r)
-                        for r in (history_dedup.get('removed_records', []) or [])
-                        if hasattr(r, 'probe_sn')
-                    ],
+                    'removed_records': [],
                 },
                 'history_import_summaries': history_summaries,
             }
             self.history_store_path.parent.mkdir(parents=True, exist_ok=True)
             self.history_store_path.write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2),
+                json.dumps(payload, ensure_ascii=False, separators=(',', ':')),
                 encoding='utf-8',
             )
         except Exception as exc:
@@ -4978,7 +5091,7 @@ class MainWindow(QMainWindow):
                 else:
                     prog.set_progress("正在写入 Excel 文件...", 55)
                     with pd.ExcelWriter(path, engine='openpyxl') as writer:
-                        sheet_name = (export_filename[:31] or 'Sheet1')
+                        sheet_name = (export_filename[:31] or '数据表')
                         df.to_excel(writer, index=False, sheet_name=sheet_name)
                         ws = writer.sheets[sheet_name]
                         
@@ -5144,7 +5257,7 @@ class MainWindow(QMainWindow):
     def _sanitize_excel_sheet_name(sheet_name: str) -> str:
         safe = re.sub(r'[\[\]\*\?/\\:]+', '_', str(sheet_name or '').strip())
         safe = safe.strip("'")
-        return (safe[:31] or 'Sheet1')
+        return (safe[:31] or '数据表')
 
     def _json_safe(self, value):
         if isinstance(value, dict):

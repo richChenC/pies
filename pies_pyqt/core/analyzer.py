@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 class ProbeAnalyzer:
     """探头分析器"""
     MAX_ZERO_DURATION_LOG_DETAILS = 8
+    MAX_REMOVED_RECORD_DETAILS = 500
     
     def __init__(self):
         self.records: List[ProbeRecord] = []
@@ -140,7 +141,7 @@ class ProbeAnalyzer:
         else:
             seen = set()
             unique_records = []
-            removed_records = [] if collect_debug_info else None
+            removed_records = []
             dedup_report_interval = max(1, (original_count + 59) // 60) if original_count else 1
             
             for index, record in enumerate(self.records, start=1):
@@ -149,7 +150,7 @@ class ProbeAnalyzer:
                 if key not in seen:
                     seen.add(key)
                     unique_records.append(record)
-                elif removed_records is not None:
+                elif len(removed_records) < self.MAX_REMOVED_RECORD_DETAILS:
                     removed_records.append(record)
 
                 if (
@@ -162,7 +163,7 @@ class ProbeAnalyzer:
                         'deduplicate',
                         index,
                         max(original_count, 1),
-                        f"????????? {index}/{max(original_count, 1)}",
+                        f"正在整理记录 {index}/{max(original_count, 1)}",
                     )
             
             removed_count = original_count - len(unique_records)
@@ -170,7 +171,8 @@ class ProbeAnalyzer:
                 'original_count': original_count,
                 'unique_count': len(unique_records),
                 'removed_count': removed_count,
-                'removed_records': removed_records or []
+                'removed_records': removed_records,
+                'removed_records_truncated': removed_count > len(removed_records),
             }
 
         self.records = unique_records
@@ -277,15 +279,15 @@ class ProbeAnalyzer:
 
                 if total_duration == 0.0 and len(sorted_records) > 0:
                     logger.debug(f"探头 {probe_sn} 总使用时间为0分钟，但共有 {len(sorted_records)} 条记录")
-                    for i, detail in enumerate(record_details[:self.MAX_ZERO_DURATION_LOG_DETAILS], 1):
-                        logger.debug(
-                            f"记录{i}: 开始={detail['start']}, 结束={detail['end']}, "
-                            f"时间差={detail['seconds']}秒 ({detail['minutes']:.6f}分钟), "
-                            f"管道数量={detail['tube']}, 操作员={detail['operator']}"
-                        )
-                    # 如果所有记录的时间差都是0，可能是时间解析问题
-                    if record_details and all(d['minutes'] == 0.0 for d in record_details):
-                        logger.debug("所有记录的时间差都是0，可能是时间解析或数据问题")
+                    if record_details:
+                        for i, detail in enumerate(record_details[:self.MAX_ZERO_DURATION_LOG_DETAILS], 1):
+                            logger.debug(
+                                f"记录{i}: 开始={detail['start']}, 结束={detail['end']}, "
+                                f"时间差={detail['seconds']}秒 ({detail['minutes']:.6f}分钟), "
+                                f"管道数量={detail['tube']}, 操作员={detail['operator']}"
+                            )
+                        if all(d['minutes'] == 0.0 for d in record_details):
+                            logger.debug("所有记录的时间差都是0，可能是时间解析或数据问题")
                 
                 # 首次/末次使用时间基于“参与统计的有效记录”来确定
                 first_use = records_for_stats[0].start_time if records_for_stats else None
