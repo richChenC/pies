@@ -174,7 +174,6 @@ class ProbeAnalyzer:
             }
 
         self.records = unique_records
-        }
         
         if removed_count > 0:
             logger.info(f"去重完成：原始记录 {original_count} 条，去重后 {len(unique_records)} 条，移除重复记录 {removed_count} 条")
@@ -203,9 +202,9 @@ class ProbeAnalyzer:
                 sorted_records = sorted(records, key=self._record_sort_key)
                 
                 # 计算统计信息 - 精确累加每条记录的使用时长
-                record_details = [] if collect_debug_info else None  # ?????????????????????
-                record_details = []  # 用于调试（包含所有原始记录）
+                record_details = [] if collect_debug_info else None  # 用于调试（包含所有原始记录）
                 valid_records_for_stats: List[ProbeRecord] = []  # 仅包含真正参与统计/计次的记录
+                total_duration = 0.0
                 
                 from datetime import datetime
                 invalid_time = datetime(1900, 1, 1, 0, 0, 0)
@@ -252,7 +251,6 @@ class ProbeAnalyzer:
                                 'tube': r.tube_number,
                                 'operator': r.operator
                             })
-                        })
                         
                         # 如果时间差为0或负数，记录警告
                         if duration_minutes <= 0:
@@ -277,7 +275,6 @@ class ProbeAnalyzer:
                 # 如果没有任何有效记录，则回退为使用全部记录进行统计（避免全部被过滤导致完全没有数据）
                 records_for_stats = valid_records_for_stats if valid_records_for_stats else sorted_records
 
-                if collect_debug_info and total_duration == 0.0 and len(sorted_records) > 0:
                 if total_duration == 0.0 and len(sorted_records) > 0:
                     logger.debug(f"探头 {probe_sn} 总使用时间为0分钟，但共有 {len(sorted_records)} 条记录")
                     for i, detail in enumerate(record_details[:self.MAX_ZERO_DURATION_LOG_DETAILS], 1):
@@ -347,7 +344,6 @@ class ProbeAnalyzer:
                     }
                 else:
                     reuse_details = []
-                }
                 
                 # 使用次数只统计“有效记录”的数量（忽略管道数量为0、时间无效等警告行）
                 stat = ProbeStatistics(
